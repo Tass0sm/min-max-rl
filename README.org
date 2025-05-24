@@ -1,0 +1,5 @@
+#+title: Experiments for Competitive RL
+
+* TODO Competitive Gradient Descent (Baseline)
+* TODO Extragradient
+* TODO Competitive Gradient Optimization
