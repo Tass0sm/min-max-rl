@@ -1,6 +1,7 @@
 import mlflow
 
 from min_max_rl.envs import get_env
+from min_max_rl.utils import RunConfig
 from min_max_rl.agents.cgd_po import CGD_PO
 
 
@@ -10,20 +11,26 @@ def progress_fn(num_steps, metrics, *args, **kwargs):
     mlflow.log_metrics(metrics, step=num_steps)
 
 
-def training_run(run_id, env, seed, train_fn, progress_fn=progress_fn, hyperparameters={}, extras={}):
-    hyperparameters = {
-        **hyperparameters,
+def training_run(run_id, env, seed, agent_class, progress_fn=progress_fn, alg_hps={}, run_params={}, extras={}):
+    agent = agent_class(**alg_hps)
+
+    alg_hps = {
+        **alg_hps,
         "seed": seed,
     }
 
-    mlflow.log_params(hyperparameters)
+    mlflow.log_params(alg_hps)
 
-    train_fn = functools.partial(train_fn, **hyperparameters)
-
-    make_inference_fn, params, _ = train_fn(
-        environment=env,
-        progress_fn=progress_fn,
+    run_config = RunConfig(
+        env=env,
         seed=seed,
+        **run_params
+    )
+
+    make_inference_fn, params, _ = agent.train_fn(
+        run_config,
+        env,
+        progress_fn=progress_fn,
         **extras
     )
 
@@ -43,13 +50,30 @@ def train_for_all(envs, func, alg_tag, seed_range=(0, 3), extra_envs={}, **kwarg
                 func(run, env, seed, **kwargs)
 
 
-def cgd_po_train(run, env, seed):
-    pass
+def cgd_po_train(run, env, seed, run_params: dict = {}):
+    return training_run(
+        run.info.run_id,
+        env,
+        seed,
+        agent_class=CGD_PO,
+        alg_hps=env.cgd_po_hps,
+        run_params=run_params,
+        progress_fn=progress_fn,
+        extras={}
+    )
 
 
 def main():
     max_seed = 1
-    train_for_all(["LQGame"], cgd_po_train, "CGD_PO", seed_range=(0, max_seed))
+    train_for_all(["LQGame"], cgd_po_train, "CGD_PO", seed_range=(0, max_seed), run_params = {
+        # "total_env_steps": None,
+        # "episode_length": None,
+        # "num_envs": None,
+        # "num_eval_envs": None,
+        # "num_evals": None,
+        # "action_repeat": None,
+        # "max_devices_per_host": None,
+    })
 
 
 if __name__ == "__main__":
