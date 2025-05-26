@@ -18,9 +18,10 @@ def make_inference_fns(ma_po_networks: list[PPONetworks]):
     make_policy_fns = [make_inference_fn(po_network) for po_network in ma_po_networks]
 
     def make_policies(
-            agent_params: list[types.Params], deterministic: bool = False
+            params: tuple[types.PreprocessorParams, list[types.Params]], deterministic: bool = False
     ) -> types.Policy:
-        policies = [make_policy_fn(params) for make_policy_fn, params in zip(make_policy_fns, agent_params)]
+        preprocessor_params, agent_params = params
+        policies = [make_policy_fn((preprocessor_params, params)) for make_policy_fn, params in zip(make_policy_fns, agent_params)]
         return policies
 
     return make_policies

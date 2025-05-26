@@ -8,13 +8,6 @@ from brax.envs import base
 from brax.envs.base import Env, State
 
 
-@struct.dataclass
-class LQGameState(State):
-    """Custom state for LQ game (no pipeline, multi-agent reward)."""
-    # Inherits: pipeline_state, obs, reward, done, metrics, info
-    # We use defaults; only obs, reward, and done are updated each step
-
-
 class LQGame(Env):
     """Linear-Quadratic (LQ) 2-player game with bilinear rewards, stateless dynamics."""
 
@@ -28,11 +21,11 @@ class LQGame(Env):
         self.W12 = jnp.array([[1.0]])
         self.W21 = jnp.array([[1.0]])
 
-    def reset(self, rng: jax.Array) -> LQGameState:
+    def reset(self, rng: jax.Array) -> State:
         obs = jnp.zeros((self.n, 1))
         reward = jnp.zeros((2,))  # one reward per player
         done = jnp.array(False)
-        return LQGameState(
+        return State(
             pipeline_state=None,
             obs=obs,
             reward=reward,
@@ -41,9 +34,10 @@ class LQGame(Env):
             info={},
         )
 
-    def step(self, state: LQGameState, action: jax.Array) -> LQGameState:
-        a1 = action[:self.d].reshape((self.d, 1))
-        a2 = action[self.d:].reshape((self.d, 1))
+    def step(self, state: State, action: jax.Array) -> State:
+        # assumes that state might have leading dimensions of size one 
+        a1 = action[..., :self.d].reshape((self.d, 1))
+        a2 = action[..., self.d:].reshape((self.d, 1))
         x = state.obs
 
         x_next = self.A @ x + self.B1 @ a1 - self.B2 @ a2
@@ -51,13 +45,10 @@ class LQGame(Env):
         reward = jnp.stack([r0.squeeze(), r0.squeeze()])
         done = jnp.array(False)
 
-        return LQGameState(
-            pipeline_state=None,
+        return state.replace(
             obs=x_next,
             reward=reward,
             done=done,
-            metrics={},
-            info={},
         )
 
     @property
@@ -66,7 +57,7 @@ class LQGame(Env):
 
     @property
     def action_size(self) -> int:
-        return 2 * self.d  # two players
+        return self.d  # two players
 
     @property
     def backend(self) -> str:

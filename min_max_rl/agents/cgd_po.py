@@ -40,6 +40,7 @@ from orbax import checkpoint as ocp
 
 from min_max_rl.networks import ma_po_networks
 from min_max_rl.training import ma_acting
+from min_max_rl.training.ma_evaluator import MultiAgentEvaluator
 from min_max_rl.envs.wrappers import TrajectoryIdWrapper, wrap_for_training
 
 
@@ -61,7 +62,7 @@ class TrainingState:
     """Contains training state for the learner."""
 
     optimizer_state: optax.OptState
-    agent_params: list[ppo_losses.PPONetworkParams]
+    agent_params: list[PONetworkParams]
     normalizer_params: running_statistics.RunningStatisticsState
     env_steps: jnp.ndarray
 
@@ -78,6 +79,100 @@ def _strip_weak_type(tree):
         return leaf.astype(leaf.dtype)
 
     return jax.tree_util.tree_map(f, tree)
+
+
+def compute_cgd_po_loss(
+    params: list[PONetworkParams],
+    normalizer_params: any,
+    data: types.Transition,
+    rng: jnp.ndarray,
+    networks: list[ppo_networks.PPONetworks],
+    entropy_cost: float = 1e-4,
+    discounting: float = 0.9,
+    reward_scaling: float = 1.0,
+    gae_lambda: float = 0.95,
+    clipping_epsilon: float = 0.3,
+    normalize_advantage: bool = True,
+) -> Tuple[jnp.ndarray, types.Metrics]:
+  """Computes PPO loss.
+
+  Args:
+    params: Network parameters,
+    normalizer_params: Parameters of the normalizer.
+    data: Transition that with leading dimension [B, T]. extra fields required
+      are ['state_extras']['truncation'] ['policy_extras']['raw_action']
+      ['policy_extras']['log_prob']
+    rng: Random key
+    ppo_network: PPO networks.
+    entropy_cost: entropy cost.
+    discounting: discounting,
+    reward_scaling: reward multiplier.
+    gae_lambda: General advantage estimation lambda.
+    clipping_epsilon: Policy loss clipping epsilon
+    normalize_advantage: whether to normalize advantage estimate
+
+  Returns:
+    A tuple (loss, metrics)
+  """
+  breakpoint()
+  parametric_action_distribution = ppo_network.parametric_action_distribution
+  policy_apply = ppo_network.policy_network.apply
+  value_apply = ppo_network.value_network.apply
+
+  # Put the time dimension first.
+  data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
+  policy_logits = policy_apply(
+      normalizer_params, params.policy, data.observation
+  )
+
+  baseline = value_apply(normalizer_params, params.value, data.observation)
+  terminal_obs = jax.tree_util.tree_map(lambda x: x[-1], data.next_observation)
+  bootstrap_value = value_apply(normalizer_params, params.value, terminal_obs)
+
+  rewards = data.reward * reward_scaling
+  truncation = data.extras['state_extras']['truncation']
+  termination = (1 - data.discount) * (1 - truncation)
+
+  target_action_log_probs = parametric_action_distribution.log_prob(
+      policy_logits, data.extras['policy_extras']['raw_action']
+  )
+  behaviour_action_log_probs = data.extras['policy_extras']['log_prob']
+
+  vs, advantages = compute_gae(
+      truncation=truncation,
+      termination=termination,
+      rewards=rewards,
+      values=baseline,
+      bootstrap_value=bootstrap_value,
+      lambda_=gae_lambda,
+      discount=discounting,
+  )
+  if normalize_advantage:
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+  rho_s = jnp.exp(target_action_log_probs - behaviour_action_log_probs)
+
+  surrogate_loss1 = rho_s * advantages
+  surrogate_loss2 = (
+      jnp.clip(rho_s, 1 - clipping_epsilon, 1 + clipping_epsilon) * advantages
+  )
+
+  policy_loss = -jnp.mean(jnp.minimum(surrogate_loss1, surrogate_loss2))
+
+  # Value function loss
+  v_error = vs - baseline
+  v_loss = jnp.mean(v_error * v_error) * 0.5 * 0.5
+
+  # Entropy reward
+  entropy = jnp.mean(parametric_action_distribution.entropy(policy_logits, rng))
+  entropy_loss = entropy_cost * -entropy
+
+  total_loss = policy_loss + v_loss + entropy_loss
+  return total_loss, {
+      'total_loss': total_loss,
+      'policy_loss': policy_loss,
+      'v_loss': v_loss,
+      'entropy_loss': entropy_loss,
+  }
 
 
 @dataclass
@@ -145,7 +240,7 @@ class CGD_PO:
           progress_fn: a user-defined callback function for reporting/plotting metrics
 
         Returns:
-          Tuple of (make_policy function, network params, metrics)
+          Tuple of (make_policies function, network params, metrics)
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
@@ -216,8 +311,10 @@ class CGD_PO:
         if self.normalize_observations:
             normalize = running_statistics.normalize
 
+        num_agents = 2
+
         networks = network_factory(
-            2, # num agents
+            num_agents,
             env_state.obs.shape[-1],
             env.action_size,
             preprocess_observations_fn=normalize,
@@ -290,12 +387,14 @@ class CGD_PO:
             training_state, state, key = carry
             update_key, key_generate_unroll, new_key = jax.random.split(key, 3)
 
-            policies = make_policies(training_state.normalizer_params, training_state.agent_params)
+            policies = make_policies((training_state.normalizer_params, [
+                ap.policy for ap in training_state.agent_params
+            ]))
 
             def f(carry, unused_t):
                 current_state, current_key = carry
                 current_key, next_key = jax.random.split(current_key)
-                next_state, data = ma_acting.generate_unroll(
+                next_state, data = ma_acting.ma_generate_unroll(
                     env,
                     current_state,
                     policies,
@@ -331,7 +430,7 @@ class CGD_PO:
                 ),
                 (
                     training_state.optimizer_state,
-                    training_state.params,
+                    training_state.agent_params,
                     update_key,
                 ),
                 (),
@@ -394,14 +493,16 @@ class CGD_PO:
             )  # pytype: disable=bad-return-type  # py311-upgrade
 
         # Initialize model params and training state.
-        init_params = ppo_losses.PPONetworkParams(
-            policy=ppo_network.policy_network.init(key_policy),
-            value=ppo_network.value_network.init(key_value),
-        )
+        policy_keys = jax.random.split(key_policy, num_agents)
+        value_keys = jax.random.split(key_value, num_agents)
+        init_params = [PONetworkParams(
+            policy=network.policy_network.init(policy_key),
+            value=network.value_network.init(value_key),
+        ) for network, policy_key, value_key in zip(networks, policy_keys, value_keys)]
 
         training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
             optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
-            params=init_params,
+            agent_params=init_params,
             normalizer_params=running_statistics.init_state(
                 specs.Array(env_state.obs.shape[-1:], jnp.dtype("float32"))
             ),
@@ -410,10 +511,10 @@ class CGD_PO:
 
         if config.total_env_steps == 0:
             return (
-                make_policy,
+                make_policies,
                 (
                     training_state.normalizer_params,
-                    training_state.params,
+                    [ap.policy for ap in training_state.agent_params],
                 ),
                 {},
             )
@@ -451,10 +552,10 @@ class CGD_PO:
             randomization_fn=v_randomization_fn,
         )
 
-        evaluator = acting.Evaluator(
+        evaluator = MultiAgentEvaluator(
             eval_env,
             functools.partial(
-                make_policy,
+                make_policies,
                 deterministic=self.deterministic_eval,
             ),
             num_eval_envs=config.num_eval_envs,
@@ -470,7 +571,7 @@ class CGD_PO:
                 _unpmap(
                     (
                         training_state.normalizer_params,
-                        training_state.params.policy,
+                        [ap.policy for ap in training_state.agent_params],
                     )
                 ),
                 training_metrics={},
@@ -478,11 +579,11 @@ class CGD_PO:
             progress_fn(
                 0,
                 metrics,
-                make_policy,
+                make_policies,
                 _unpmap(
                     (
                         training_state.normalizer_params,
-                        training_state.params.policy,
+                        [ap.policy for ap in training_state.agent_params],
                     )
                 ),
                 unwrapped_env,
@@ -535,11 +636,11 @@ class CGD_PO:
                     progress_fn(
                         current_step,
                         metrics,
-                        make_policy,
+                        make_policies,
                         _unpmap(
                             (
                                 training_state.normalizer_params,
-                                training_state.params.policy,
+                                [ap.policy for ap in training_state.agent_params],
                             )
                         ),
                         unwrapped_env,
