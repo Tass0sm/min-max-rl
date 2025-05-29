@@ -84,9 +84,9 @@ def compute_linear_obj(
         params: PONetworkParams,
         normalizer_params: any,
         data: types.Transition,
-        agent_idx: int,
         network: ppo_networks.PPONetworks,
         reward_scaling: float = 1.0,
+        agent_idx: int = 0,
 ) -> Tuple[jnp.ndarray, types.Metrics]:
   """Computes PPO loss.
 
@@ -107,7 +107,7 @@ def compute_linear_obj(
 
   raw_action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
 
-  dist_logits = networks.policy_network.apply(normalizer_params, params.policy, data.observation)
+  dist_logits = network.policy_network.apply(normalizer_params, params.policy, data.observation)
 
   log_probs = network.parametric_action_distribution.log_prob(dist_logits, raw_action).squeeze()
 
@@ -121,74 +121,9 @@ def compute_linear_obj(
   }
 
 
-def compute_bilinear_obj(
-    params: list[PONetworkParams],
-    normalizer_params: any,
-    data: types.Transition,
-    networks: list[ppo_networks.PPONetworks],
-    reward_scaling: float = 1.0,
-) -> Tuple[jnp.ndarray, types.Metrics]:
-  """Computes PPO loss.
-
-  Args:
-    params: list[PO network parameters],
-    normalizer_params: Parameters of the normalizer.
-    data: Transition that with leading dimension [B, T]. extra fields required
-      are ['policy_extras']['raw_action']
-    networks: list[PO networks].
-    reward_scaling: reward multiplier.
-
-  Returns:
-    A tuple (loss, metrics)
-  """
-
-  return_per_agent = data.reward.sum(axis=1) * reward_scaling
-  positive_returns = return_per_agent[..., 0, None]
-
-  raw_action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
-  raw_action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
-
-  dist_logits0 = networks[0].policy_network.apply(normalizer_params, params[0].policy, data.observation)
-  dist_logits1 = networks[1].policy_network.apply(normalizer_params, params[1].policy, data.observation)
-
-  log_probs0 = networks[0].parametric_action_distribution.log_prob(dist_logits0, raw_action0).squeeze()
-  log_probs1 = networks[1].parametric_action_distribution.log_prob(dist_logits1, raw_action1).squeeze()
-
-  # this mask is 0 wherever the episode ended (termination, not truncation)
-  mask = data.discount
-
-  def cumsum_with_pad_and_mask(xs, mask):
-      xs_and_mask = jnp.stack((xs, mask), axis=-1)
-
-      def f(carry, x_and_mask):
-          x, mask = x_and_mask
-          # if mask is zero, the cumsum is reset to zero
-          result = (carry + x) * mask
-          return result, result
-
-      _, out = jax.lax.scan(f, 0.0, xs_and_mask)
-      padded_out = jnp.pad(out, ((1, 0)), mode='constant', constant_values=0.0)[:-1]
-      return padded_out
-
-  s_log_probs0 = jax.vmap(cumsum_with_pad_and_mask)(log_probs0, mask)
-  s_log_probs1 = jax.vmap(cumsum_with_pad_and_mask)(log_probs1, mask)
-
-  # TOTAL OBJECTIVE (For Bilinear Terms)
-
-  bilinear_obj_1 = (log_probs0 * log_probs1 * positive_returns).mean()
-  bilinear_obj_2 = (s_log_probs0[1:]*log_probs1[1:]*positive_returns[1:]).mean()
-  bilinear_obj_3 = (log_probs0[1:]*s_log_probs1[1:]*positive_returns[1:]).mean()
-
-  bilinear_obj = bilinear_obj_1 + bilinear_obj_2 + bilinear_obj_3
-
-  return bilinear_obj, {
-      'bilinear_obj': bilinear_obj,
-  }
-
-
 @dataclass
-class CGD_PO:
-    """Competitive Gradient Descent Policy Optimization Agent.
+class GDA_PO:
+    """Gradient Descent Ascent Policy Optimization Agent.
     Args:
       learning_rate: learning rate for ppo loss
       entropy_cost: entropy reward for ppo loss, higher values increase entropy of
@@ -242,7 +177,7 @@ class CGD_PO:
         ] = None,
         progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     ):
-        """CGD-PO training.
+        """GDA-PO training.
 
         Args:
           train_env: the train_env to train
@@ -329,36 +264,29 @@ class CGD_PO:
             env_state.obs.shape[-1],
             env.action_size,
             preprocess_observations_fn=normalize,
+            policy_hidden_layer_sizes=[],
         )
         make_policies = ma_po_networks.make_inference_fns(networks)
 
-        optimizer = optax.adam(learning_rate=self.learning_rate)
+        optimizer = optax.sgd(learning_rate=self.learning_rate)
 
         agent0_linear_obj_term = functools.partial(
             compute_linear_obj,
-            networks=networks[0],
+            network=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
             compute_linear_obj,
-            networks=networks[1],
+            network=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=1,
         )
 
-        bilinear_obj_term = functools.partial(
-            compute_bilinear_obj,
-            networks=networks,
-            reward_scaling=self.reward_scaling,
-            agent_idx=1,
-        )
-
-        gradient_update_fn = ma_gradients.cgd_update_fn(
+        gradient_update_fn = ma_gradients.gda_update_fn(
             agent0_linear_obj_term,
             agent1_linear_obj_term,
-            bilinear_obj_term,
             optimizer,
             pmap_axis_name=_PMAP_AXIS_NAME,
             have_aux=True,
@@ -370,12 +298,10 @@ class CGD_PO:
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
             optimizer_state, params, key = carry
-            key, key_loss = jax.random.split(key)
             (_, metrics), params, optimizer_state = gradient_update_fn(
                 params,
                 normalizer_params,
                 data,
-                key_loss,
                 optimizer_state=optimizer_state,
             )
 
@@ -445,7 +371,7 @@ class CGD_PO:
                 pmap_axis_name=_PMAP_AXIS_NAME,
             )
 
-            (optimizer_state, params, _), metrics = jax.lax.scan(
+            (optimizer_state, agent_params, _), metrics = jax.lax.scan(
                 functools.partial(
                     update_step,
                     data=data,
@@ -462,7 +388,7 @@ class CGD_PO:
 
             new_training_state = TrainingState(
                 optimizer_state=optimizer_state,
-                params=params,
+                agent_params=agent_params,
                 normalizer_params=normalizer_params,
                 env_steps=training_state.env_steps + utd_ratio,
             )
@@ -650,7 +576,7 @@ class CGD_PO:
                         _unpmap(
                             (
                                 training_state.normalizer_params,
-                                training_state.params.policy,
+                                [ap.policy for ap in training_state.agent_params],
                             )
                         ),
                         training_metrics,
@@ -679,9 +605,9 @@ class CGD_PO:
         params = _unpmap(
             (
                 training_state.normalizer_params,
-                training_state.params.policy,
+                [ap.policy for ap in training_state.agent_params],
             )
         )
         logging.info("total steps: %s", total_steps)
         pmap.synchronize_hosts()
-        return make_policy, params, metrics
+        return make_policies, params, metrics

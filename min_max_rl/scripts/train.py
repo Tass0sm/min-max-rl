@@ -1,8 +1,11 @@
 import mlflow
 
+from brax.io import model
+
 from min_max_rl.envs import get_env
 from min_max_rl.utils import RunConfig
 from min_max_rl.agents.cgd_po import CGD_PO
+from min_max_rl.agents.gda_po import GDA_PO
 
 
 def progress_fn(num_steps, metrics, *args, **kwargs):
@@ -63,14 +66,26 @@ def cgd_po_train(run, env, seed, run_params: dict = {}):
     )
 
 
+def gda_po_train(run, env, seed, run_params: dict = {}):
+    return training_run(
+        run.info.run_id,
+        env,
+        seed,
+        agent_class=GDA_PO,
+        alg_hps=env.gda_po_hps,
+        run_params=run_params,
+        progress_fn=progress_fn,
+        extras={}
+    )
+
 def main():
     max_seed = 1
-    train_for_all(["LQGame"], cgd_po_train, "CGD_PO", seed_range=(0, max_seed), run_params = {
-        # "total_env_steps": None,
+    train_for_all(["LQGame"], gda_po_train, "GDA_PO", seed_range=(0, max_seed), run_params = {
+        "total_env_steps": 5_000_000,
         # "episode_length": None,
-        # "num_envs": None,
+        "num_envs": 100,
         # "num_eval_envs": None,
-        # "num_evals": None,
+        "num_evals": 10,
         # "action_repeat": None,
         # "max_devices_per_host": None,
     })

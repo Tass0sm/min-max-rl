@@ -73,9 +73,30 @@ class LQGame(Env):
             "learning_rate": 1e-4,
             "entropy_cost": 1e-4,
             "discounting": 0.9,
-            "unroll_length": 10,
-            "batch_size": 32,
-            "num_minibatches": 16,
+            "unroll_length": 5,
+            "batch_size": 1000,
+            "num_minibatches": 1,
+            "num_updates_per_batch": 2,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
+            "clipping_epsilon": 0.3,
+            "gae_lambda": 0.95,
+            "deterministic_eval": False,
+            "normalize_advantage": True,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+        }
+
+    @property
+    def gda_po_hps(self):
+        return {
+            "learning_rate": 1e-4,
+            "entropy_cost": 1e-4,
+            "discounting": 0.9,
+            "unroll_length": 5,
+            "batch_size": 1000,
+            "num_minibatches": 1,
             "num_updates_per_batch": 2,
             "num_resets_per_eval": 0,
             "normalize_observations": False,
