@@ -32,7 +32,7 @@ class Bilinear(Env):
         a1 = action[0]
         a2 = action[1]
         r = a1 * a2
-        reward = jnp.array([r, r])
+        reward = jnp.array([r, -r])
         done = jnp.array(True)  # ends after one step
         obs = jnp.array([0.0])
 
@@ -48,7 +48,7 @@ class Bilinear(Env):
 
     @property
     def action_size(self) -> int:
-        return 2  # a1 and a2
+        return 1  # action size per agent
 
     @property
     def backend(self) -> str:
@@ -64,10 +64,10 @@ class Bilinear(Env):
             "learning_rate": 1e-4,
             "entropy_cost": 1e-4,
             "discounting": 0.9,
-            "unroll_length": 5,
-            "batch_size": 1000,
+            "unroll_length": 1,
+            "batch_size": 1,
             "num_minibatches": 1,
-            "num_updates_per_batch": 2,
+            "num_updates_per_batch": 1,
             "num_resets_per_eval": 0,
             "normalize_observations": False,
             "reward_scaling": 1.0,
