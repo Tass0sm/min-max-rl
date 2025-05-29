@@ -36,7 +36,7 @@ def ma_actor_step(
   state_extras = {x: nstate.info[x] for x in extra_fields}
   return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
       observation=env_state.obs,
-      action=actions,
+      action=ma_actions,
       reward=nstate.reward,
       discount=1 - nstate.done,
       next_observation=nstate.obs,
