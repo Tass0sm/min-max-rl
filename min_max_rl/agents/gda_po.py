@@ -38,7 +38,7 @@ from brax.v1 import envs as envs_v1
 from etils import epath
 from orbax import checkpoint as ocp
 
-from min_max_rl.networks import ma_po_networks
+from min_max_rl.networks import ma_po_networks, ma_deterministic_po_networks
 from min_max_rl.training import ma_acting, ma_gradients
 from min_max_rl.training.ma_evaluator import MultiAgentEvaluator
 from min_max_rl.envs.wrappers import TrajectoryIdWrapper, wrap_for_training
@@ -111,10 +111,43 @@ def compute_linear_obj(
 
   log_probs = network.parametric_action_distribution.log_prob(dist_logits, raw_action).squeeze()
 
-  # this mask is 0 wherever the episode ended (termination, not truncation)
-  mask = data.discount
-
   linear_obj = (log_probs * positive_returns).mean()
+
+  return linear_obj, {
+      f'linear_obj{agent_idx}': linear_obj,
+  }
+
+
+def compute_deterministic_linear_obj(
+        params: PONetworkParams,
+        normalizer_params: any,
+        data: types.Transition,
+        network: ppo_networks.PPONetworks,
+        reward_scaling: float = 1.0,
+        agent_idx: int = 0,
+) -> Tuple[jnp.ndarray, types.Metrics]:
+  """Computes PPO loss.
+
+  Args:
+    params: Network parameters,
+    normalizer_params: Parameters of the normalizer.
+    data: Transition that with leading dimension [B, T]. extra fields required
+      are ['policy_extras']['agent{i}_raw_action']
+    network: PO networks.
+    reward_scaling: reward multiplier.
+
+  Returns:
+    A tuple (loss, metrics)
+  """
+
+  def closed_form_action_value_function(state, agent_i_action, other_agent_action):
+      # order doesn't matter and horizon = 1
+      return agent_i_action[0] * other_agent_action[1]
+
+  agent_i_action = network.policy_network.apply(normalizer_params, params.policy, data.observation)
+  other_agent_action = data.action[..., 1-agent_idx, None]
+
+  linear_obj = closed_form_action_value_function(data.observation, agent_i_action, other_agent_action).mean()
 
   return linear_obj, {
       f'linear_obj{agent_idx}': linear_obj,
@@ -190,7 +223,7 @@ class GDA_PO:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = ma_po_networks.make_ma_po_networks
+        network_factory = ma_deterministic_po_networks.make_ma_deterministic_po_networks
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -266,19 +299,19 @@ class GDA_PO:
             preprocess_observations_fn=normalize,
             policy_hidden_layer_sizes=[],
         )
-        make_policies = ma_po_networks.make_inference_fns(networks)
+        make_policies = ma_deterministic_po_networks.make_inference_fns(networks)
 
         optimizer = optax.sgd(learning_rate=self.learning_rate)
 
         agent0_linear_obj_term = functools.partial(
-            compute_linear_obj,
+            compute_deterministic_linear_obj,
             network=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
-            compute_linear_obj,
+            compute_deterministic_linear_obj,
             network=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=1,
