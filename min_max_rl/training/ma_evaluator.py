@@ -85,6 +85,16 @@ class MultiAgentEvaluator:
           )
           for name, value in eval_metrics.episode_metrics.items()
       })
+
+    # overwrite with reward computation
+    # TODO: potentially log individual rewards per agent
+    rewards = eval_metrics.episode_metrics["rewards"]
+    positive_rewards = rewards[..., 0]
+    metrics.update({
+        'eval/episode_reward': (np.mean(positive_rewards) if aggregate_episodes else positive_rewards),
+        'eval/episode_reward_std': (np.std(positive_rewards) if aggregate_episodes else positive_rewards)
+    })
+
     metrics['eval/avg_episode_length'] = np.mean(eval_metrics.episode_steps)
     metrics['eval/std_episode_length'] = np.std(eval_metrics.episode_steps)
     metrics['eval/epoch_eval_time'] = epoch_eval_time
