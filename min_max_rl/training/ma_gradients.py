@@ -52,7 +52,7 @@ def gda_update_fn(
     agent0_result, agent0_grads = agent0_linear_loss_and_pgrad_fn(xy_arg[0], *rest)
     agent1_result, agent1_grads = agent1_linear_loss_and_pgrad_fn(xy_arg[1], *rest)
     grads = [agent0_grads, jax.tree.map(lambda x: -x, agent1_grads)]
-    params_update, optimizer_state = optimizer.update(grads, optimizer_state)
+    params_update, optimizer_state = optimizer.update(grads, optimizer_state, params=xy_arg)
     params = optax.apply_updates(xy_arg, params_update)
 
     if have_aux:
