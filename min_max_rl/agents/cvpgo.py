@@ -1,0 +1,2 @@
+class CVPGO:
+    pass

@@ -1,20 +1,4 @@
-# Copyright 2024 The Brax Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Proximal policy optimization training.
-
-See: https://arxiv.org/pdf/1707.06347.pdf
+"""Competitive Deterministic Policy Gradient Descent
 """
 
 import functools
@@ -38,7 +22,8 @@ from brax.v1 import envs as envs_v1
 from etils import epath
 from orbax import checkpoint as ocp
 
-from min_max_rl.networks import ma_po_networks
+from min_max_rl.sma import simple_moving_average
+from min_max_rl.networks import ma_po_networks, ma_deterministic_po_networks
 from min_max_rl.training import ma_acting, ma_gradients
 from min_max_rl.training.ma_evaluator import MultiAgentEvaluator
 from min_max_rl.envs.wrappers import TrajectoryIdWrapper, wrap_for_training
@@ -80,13 +65,13 @@ def _strip_weak_type(tree):
     return jax.tree_util.tree_map(f, tree)
 
 
-def compute_linear_obj(
+def compute_deterministic_linear_obj(
         params: PONetworkParams,
         normalizer_params: any,
         data: types.Transition,
-        agent_idx: int,
         network: ppo_networks.PPONetworks,
         reward_scaling: float = 1.0,
+        agent_idx: int = 0,
 ) -> Tuple[jnp.ndarray, types.Metrics]:
   """Computes PPO loss.
 
@@ -102,26 +87,21 @@ def compute_linear_obj(
     A tuple (loss, metrics)
   """
 
-  return_per_agent = data.reward.sum(axis=1) * reward_scaling
-  positive_returns = return_per_agent[..., 0, None]
+  def closed_form_action_value_function(state, agent_i_action, other_agent_action):
+      # order doesn't matter and horizon = 1
+      return agent_i_action[0] * other_agent_action[1]
 
-  raw_action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  agent_i_action = network.policy_network.apply(normalizer_params, params.policy, data.observation)
+  other_agent_action = data.action[..., 1-agent_idx, None]
 
-  dist_logits = networks.policy_network.apply(normalizer_params, params.policy, data.observation)
-
-  log_probs = network.parametric_action_distribution.log_prob(dist_logits, raw_action).squeeze()
-
-  # this mask is 0 wherever the episode ended (termination, not truncation)
-  mask = data.discount
-
-  linear_obj = (log_probs * positive_returns).mean()
+  linear_obj = closed_form_action_value_function(data.observation, agent_i_action, other_agent_action).mean()
 
   return linear_obj, {
       f'linear_obj{agent_idx}': linear_obj,
   }
 
 
-def compute_bilinear_obj(
+def compute_deterministic_bilinear_obj(
     params: list[PONetworkParams],
     normalizer_params: any,
     data: types.Transition,
@@ -187,12 +167,10 @@ def compute_bilinear_obj(
 
 
 @dataclass
-class CGD_PO:
-    """Competitive Gradient Descent Policy Optimization Agent.
+class CDPGD:
+    """Competitive Deterministic Policy Gradient Descent
     Args:
       learning_rate: learning rate for ppo loss
-      entropy_cost: entropy reward for ppo loss, higher values increase entropy of
-        the policy
       discounting: discounting rate
       unroll_length: the number of timesteps to unroll in each train_env. The
         PPO loss is computed over `unroll_length` timesteps
@@ -205,18 +183,14 @@ class CGD_PO:
         eval. The train_env resets occur on the host
       normalize_observations: whether to normalize observations
       reward_scaling: float scaling for reward
-      clipping_epsilon: clipping epsilon for PPO loss
-      gae_lambda: General advantage estimation lambda
       deterministic_eval: whether to run the eval with a deterministic policy
       network_factory: function that generates networks for policy and value
         functions
       progress_fn: a user-defined callback function for reporting/plotting metrics
-      normalize_advantage: whether to normalize advantage estimate
       restore_checkpoint_path: the path used to restore previous model params
     """
 
     learning_rate: float = 1e-4
-    entropy_cost: float = 1e-4
     discounting: float = 0.9
     unroll_length: int = 10
     batch_size: int = 32
@@ -225,10 +199,7 @@ class CGD_PO:
     num_resets_per_eval: int = 0
     normalize_observations: bool = False
     reward_scaling: float = 1.0
-    clipping_epsilon: float = 0.3
-    gae_lambda: float = 0.95
     deterministic_eval: bool = False
-    normalize_advantage: bool = True
     restore_checkpoint_path: Optional[str] = None
     train_step_multiplier: int = 1
 
@@ -242,7 +213,7 @@ class CGD_PO:
         ] = None,
         progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     ):
-        """CGD-PO training.
+        """GDA-PO training.
 
         Args:
           train_env: the train_env to train
@@ -255,7 +226,7 @@ class CGD_PO:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = ma_po_networks.make_ma_po_networks
+        network_factory = ma_deterministic_po_networks.make_ma_deterministic_po_networks
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -329,36 +300,29 @@ class CGD_PO:
             env_state.obs.shape[-1],
             env.action_size,
             preprocess_observations_fn=normalize,
+            policy_hidden_layer_sizes=[],
         )
-        make_policies = ma_po_networks.make_inference_fns(networks)
+        make_policies = ma_deterministic_po_networks.make_inference_fns(networks)
 
-        optimizer = optax.adam(learning_rate=self.learning_rate)
+        optimizer = optax.sgd(learning_rate=self.learning_rate)
 
         agent0_linear_obj_term = functools.partial(
-            compute_linear_obj,
-            networks=networks[0],
+            compute_deterministic_linear_obj,
+            network=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
-            compute_linear_obj,
-            networks=networks[1],
+            compute_deterministic_linear_obj,
+            network=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=1,
         )
 
-        bilinear_obj_term = functools.partial(
-            compute_bilinear_obj,
-            networks=networks,
-            reward_scaling=self.reward_scaling,
-            agent_idx=1,
-        )
-
-        gradient_update_fn = ma_gradients.cgd_update_fn(
+        gradient_update_fn = ma_gradients.gda_update_fn(
             agent0_linear_obj_term,
             agent1_linear_obj_term,
-            bilinear_obj_term,
             optimizer,
             pmap_axis_name=_PMAP_AXIS_NAME,
             have_aux=True,
@@ -370,12 +334,10 @@ class CGD_PO:
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
             optimizer_state, params, key = carry
-            key, key_loss = jax.random.split(key)
             (_, metrics), params, optimizer_state = gradient_update_fn(
                 params,
                 normalizer_params,
                 data,
-                key_loss,
                 optimizer_state=optimizer_state,
             )
 
@@ -445,7 +407,7 @@ class CGD_PO:
                 pmap_axis_name=_PMAP_AXIS_NAME,
             )
 
-            (optimizer_state, params, _), metrics = jax.lax.scan(
+            (optimizer_state, agent_params, _), metrics = jax.lax.scan(
                 functools.partial(
                     update_step,
                     data=data,
@@ -462,7 +424,7 @@ class CGD_PO:
 
             new_training_state = TrainingState(
                 optimizer_state=optimizer_state,
-                params=params,
+                agent_params=agent_params,
                 normalizer_params=normalizer_params,
                 env_steps=training_state.env_steps + utd_ratio,
             )
@@ -650,7 +612,7 @@ class CGD_PO:
                         _unpmap(
                             (
                                 training_state.normalizer_params,
-                                training_state.params.policy,
+                                [ap.policy for ap in training_state.agent_params],
                             )
                         ),
                         training_metrics,
@@ -679,9 +641,9 @@ class CGD_PO:
         params = _unpmap(
             (
                 training_state.normalizer_params,
-                training_state.params.policy,
+                [ap.policy for ap in training_state.agent_params],
             )
         )
         logging.info("total steps: %s", total_steps)
         pmap.synchronize_hosts()
-        return make_policy, params, metrics
+        return make_policies, params, metrics

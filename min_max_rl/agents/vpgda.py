@@ -1,20 +1,4 @@
-# Copyright 2024 The Brax Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-"""Proximal policy optimization training.
-
-See: https://arxiv.org/pdf/1707.06347.pdf
+"""Vanilla Policy Gradient-Descent Ascent
 """
 
 import functools
@@ -113,54 +97,21 @@ def compute_linear_obj(
 
   linear_obj = (log_probs * positive_returns).mean()
 
-  return linear_obj, {
-      f'linear_obj{agent_idx}': linear_obj,
-  }
-
-
-def compute_deterministic_linear_obj(
-        params: PONetworkParams,
-        normalizer_params: any,
-        data: types.Transition,
-        network: ppo_networks.PPONetworks,
-        reward_scaling: float = 1.0,
-        agent_idx: int = 0,
-) -> Tuple[jnp.ndarray, types.Metrics]:
-  """Computes PPO loss.
-
-  Args:
-    params: Network parameters,
-    normalizer_params: Parameters of the normalizer.
-    data: Transition that with leading dimension [B, T]. extra fields required
-      are ['policy_extras']['agent{i}_raw_action']
-    network: PO networks.
-    reward_scaling: reward multiplier.
-
-  Returns:
-    A tuple (loss, metrics)
-  """
-
-  def closed_form_action_value_function(state, agent_i_action, other_agent_action):
-      # order doesn't matter and horizon = 1
-      return agent_i_action[0] * other_agent_action[1]
-
-  agent_i_action = network.policy_network.apply(normalizer_params, params.policy, data.observation)
-  other_agent_action = data.action[..., 1-agent_idx, None]
-
-  linear_obj = closed_form_action_value_function(data.observation, agent_i_action, other_agent_action).mean()
+  mean_action_mode = network.parametric_action_distribution.mode(dist_logits).mean()
+  mean_action_noise_scale = network.parametric_action_distribution.create_dist(dist_logits).scale.mean()
 
   return linear_obj, {
       f'linear_obj{agent_idx}': linear_obj,
+      f'mean_action_mode{agent_idx}': mean_action_mode,
+      f'mean_action_noise_scale{agent_idx}': mean_action_noise_scale,
   }
 
 
 @dataclass
-class GDA_PO:
-    """Gradient Descent Ascent Policy Optimization Agent.
+class VPGDA:
+    """Vanilla Policy Gradient Descent Ascent.
     Args:
       learning_rate: learning rate for ppo loss
-      entropy_cost: entropy reward for ppo loss, higher values increase entropy of
-        the policy
       discounting: discounting rate
       unroll_length: the number of timesteps to unroll in each train_env. The
         PPO loss is computed over `unroll_length` timesteps
@@ -173,18 +124,14 @@ class GDA_PO:
         eval. The train_env resets occur on the host
       normalize_observations: whether to normalize observations
       reward_scaling: float scaling for reward
-      clipping_epsilon: clipping epsilon for PPO loss
-      gae_lambda: General advantage estimation lambda
       deterministic_eval: whether to run the eval with a deterministic policy
       network_factory: function that generates networks for policy and value
         functions
       progress_fn: a user-defined callback function for reporting/plotting metrics
-      normalize_advantage: whether to normalize advantage estimate
       restore_checkpoint_path: the path used to restore previous model params
     """
 
     learning_rate: float = 1e-4
-    entropy_cost: float = 1e-4
     discounting: float = 0.9
     unroll_length: int = 10
     batch_size: int = 32
@@ -193,10 +140,7 @@ class GDA_PO:
     num_resets_per_eval: int = 0
     normalize_observations: bool = False
     reward_scaling: float = 1.0
-    clipping_epsilon: float = 0.3
-    gae_lambda: float = 0.95
     deterministic_eval: bool = False
-    normalize_advantage: bool = True
     restore_checkpoint_path: Optional[str] = None
     train_step_multiplier: int = 1
 
@@ -223,7 +167,7 @@ class GDA_PO:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = ma_deterministic_po_networks.make_ma_deterministic_po_networks
+        network_factory = ma_po_networks.make_ma_po_networks
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -299,19 +243,19 @@ class GDA_PO:
             preprocess_observations_fn=normalize,
             policy_hidden_layer_sizes=[],
         )
-        make_policies = ma_deterministic_po_networks.make_inference_fns(networks)
+        make_policies = ma_po_networks.make_inference_fns(networks)
 
         optimizer = optax.sgd(learning_rate=self.learning_rate)
 
         agent0_linear_obj_term = functools.partial(
-            compute_deterministic_linear_obj,
+            compute_linear_obj,
             network=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
-            compute_deterministic_linear_obj,
+            compute_linear_obj,
             network=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=1,

@@ -2,6 +2,7 @@
 
 from typing import Sequence, Tuple
 
+import jax
 from brax.training import distribution
 from brax.training import networks
 from brax.training import types
@@ -10,6 +11,7 @@ import flax
 from flax import linen
 
 from brax.training.agents.ppo.networks import make_inference_fn
+from . import my_networks
 
 
 @flax.struct.dataclass
@@ -41,18 +43,21 @@ def make_pi_network(
     preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     activation: networks.ActivationFn = linen.swish,
+    bias_init = jax.nn.initializers.constant(0.5),
     policy_obs_key: str = 'state',
 ) -> PiNetwork:
   """Make Pi network with preprocessor."""
   parametric_action_distribution = distribution.NormalTanhDistribution(
-      event_size=action_size
+    event_size=action_size,
+    var_scale=0.05
   )
-  policy_network = networks.make_policy_network(
+  policy_network = my_networks.make_policy_network(
       parametric_action_distribution.param_size,
       observation_size,
       preprocess_observations_fn=preprocess_observations_fn,
       hidden_layer_sizes=policy_hidden_layer_sizes,
       activation=activation,
+      bias_init=bias_init,
       obs_key=policy_obs_key,
   )
 
@@ -73,11 +78,17 @@ def make_ma_po_networks(
 ) -> list[PiNetwork]:
     """Make policy networks with preprocessor."""
   
+    bias_inits = [
+      jax.nn.initializers.constant(0.5),
+      jax.nn.initializers.constant(0.5)
+    ]
+
     return [
         make_pi_network(observation_size,
                         action_size,
                         preprocess_observations_fn,
                         policy_hidden_layer_sizes,
                         activation,
-                        policy_obs_key) for _ in range(n_agents)
+                        bias_init,
+                        policy_obs_key) for bias_init in bias_inits
     ]

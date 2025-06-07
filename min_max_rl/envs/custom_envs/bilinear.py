@@ -59,10 +59,9 @@ class Bilinear(Env):
     #
 
     @property
-    def gda_po_hps(self):
+    def dpgda_hps(self):
         return {
             "learning_rate": 1e-2,
-            "entropy_cost": 1e-2,
             "discounting": 0.9,
             "unroll_length": 1,
             "batch_size": 1,
@@ -71,10 +70,41 @@ class Bilinear(Env):
             "num_resets_per_eval": 0,
             "normalize_observations": False,
             "reward_scaling": 1.0,
-            "clipping_epsilon": 0.3,
-            "gae_lambda": 0.95,
+            "deterministic_eval": True,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+        }
+
+    @property
+    def cdpgd_hps(self):
+        return {
+            "learning_rate": 1e-2,
+            "discounting": 0.9,
+            "unroll_length": 1,
+            "batch_size": 128,
+            "num_minibatches": 1,
+            "num_updates_per_batch": 1,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
             "deterministic_eval": False,
-            "normalize_advantage": True,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+        }
+
+    @property
+    def vpgda_hps(self):
+        return {
+            "learning_rate": 1e-2,
+            "discounting": 0.9,
+            "unroll_length": 1,
+            "batch_size": 128,
+            "num_minibatches": 1,
+            "num_updates_per_batch": 1,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
+            "deterministic_eval": False,
             "restore_checkpoint_path": None,
             "train_step_multiplier": 1,
         }
