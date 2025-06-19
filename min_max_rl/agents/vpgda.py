@@ -89,13 +89,14 @@ def compute_linear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  raw_action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  # action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  action = data.action[..., agent_idx, None]
 
   dist_logits = network.policy_network.apply(normalizer_params, params.policy, data.observation)
 
-  log_probs = network.parametric_action_distribution.log_prob(dist_logits, raw_action).squeeze()
+  log_probs = network.parametric_action_distribution.log_prob(dist_logits, action)
 
-  linear_obj = (log_probs * positive_returns).mean()
+  linear_obj = (-log_probs * positive_returns).mean()
 
   mean_action_mode = network.parametric_action_distribution.mode(dist_logits).mean()
   mean_action_noise_scale = network.parametric_action_distribution.create_dist(dist_logits).scale.mean()
@@ -154,7 +155,7 @@ class VPGDA:
         ] = None,
         progress_fn: Callable[[int, Metrics], None] = lambda *args: None,
     ):
-        """GDA-PO training.
+        """VPGDA training.
 
         Args:
           train_env: the train_env to train
@@ -167,7 +168,8 @@ class VPGDA:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = ma_po_networks.make_ma_po_networks
+        network_factory = functools.partial(ma_po_networks.make_ma_po_networks,
+                                            make_network_fn=ma_po_networks.make_normal_dist_network)
 
         process_count = jax.process_count()
         process_id = jax.process_index()

@@ -27,8 +27,9 @@ def ma_actor_step(
   """Collect data."""
   agent_actions_l = []
   ma_agent_extras = {}
-  for i, policy in enumerate(policies):
-    actions, policy_extras = policy(env_state.obs, key)
+  agent_keys = jax.random.split(key, len(policies))
+  for i, (policy, key_i) in enumerate(zip(policies, agent_keys)):
+    actions, policy_extras = policy(env_state.obs, key_i)
     agent_actions_l.append(actions)
     ma_agent_extras |= {f"agent{i}_{k}":v for k,v in policy_extras.items()}
   ma_actions = jnp.concatenate(agent_actions_l, axis=-1)
