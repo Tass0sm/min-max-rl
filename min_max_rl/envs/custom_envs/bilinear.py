@@ -108,3 +108,20 @@ class Bilinear(Env):
             "restore_checkpoint_path": None,
             "train_step_multiplier": 1,
         }
+
+    @property
+    def cvpgd_hps(self):
+        return {
+            "learning_rate": 1e-1,
+            "discounting": 0.9,
+            "unroll_length": 1,
+            "batch_size": 2000,
+            "num_minibatches": 1,
+            "num_updates_per_batch": 1,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
+            "deterministic_eval": False,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+        }

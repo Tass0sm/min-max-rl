@@ -49,6 +49,7 @@ class TrainingState:
     """Contains training state for the learner."""
 
     optimizer_state: optax.OptState
+    cgd_state: ma_gradients.CGDState
     agent_params: list[PONetworkParams]
     normalizer_params: running_statistics.RunningStatisticsState
     env_steps: jnp.ndarray
@@ -93,52 +94,22 @@ def compute_linear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  raw_action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  # action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  action = data.action[..., agent_idx, None]
 
   dist_logits = network.policy_network.apply(normalizer_params, params.policy, data.observation)
 
-  log_probs = network.parametric_action_distribution.log_prob(dist_logits, raw_action).squeeze()
+  log_probs = network.parametric_action_distribution.log_prob(dist_logits, action)
 
-  linear_obj = (log_probs * positive_returns).mean()
+  linear_obj = (-log_probs * positive_returns).mean()
 
-  return linear_obj, {
-      f'linear_obj{agent_idx}': linear_obj,
-  }
-
-
-def compute_deterministic_linear_obj(
-        params: PONetworkParams,
-        normalizer_params: any,
-        data: types.Transition,
-        network: ppo_networks.PPONetworks,
-        reward_scaling: float = 1.0,
-        agent_idx: int = 0,
-) -> Tuple[jnp.ndarray, types.Metrics]:
-  """Computes PPO loss.
-
-  Args:
-    params: Network parameters,
-    normalizer_params: Parameters of the normalizer.
-    data: Transition that with leading dimension [B, T]. extra fields required
-      are ['policy_extras']['agent{i}_raw_action']
-    network: PO networks.
-    reward_scaling: reward multiplier.
-
-  Returns:
-    A tuple (loss, metrics)
-  """
-
-  def closed_form_action_value_function(state, agent_i_action, other_agent_action):
-      # order doesn't matter and horizon = 1
-      return agent_i_action[0] * other_agent_action[1]
-
-  agent_i_action = network.policy_network.apply(normalizer_params, params.policy, data.observation)
-  other_agent_action = data.action[..., 1-agent_idx, None]
-
-  linear_obj = closed_form_action_value_function(data.observation, agent_i_action, other_agent_action).mean()
+  mean_action_mode = network.parametric_action_distribution.mode(dist_logits).mean()
+  mean_action_noise_scale = network.parametric_action_distribution.create_dist(dist_logits).scale.mean()
 
   return linear_obj, {
       f'linear_obj{agent_idx}': linear_obj,
+      f'mean_action_mode{agent_idx}': mean_action_mode,
+      f'mean_action_noise_scale{agent_idx}': mean_action_noise_scale,
   }
 
 
@@ -166,14 +137,17 @@ def compute_bilinear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  raw_action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
-  raw_action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
+  # action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
+  action0 = data.action[..., 0, None]
+
+  # action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
+  action1 = data.action[..., 1, None]
 
   dist_logits0 = networks[0].policy_network.apply(normalizer_params, params[0].policy, data.observation)
   dist_logits1 = networks[1].policy_network.apply(normalizer_params, params[1].policy, data.observation)
 
-  log_probs0 = networks[0].parametric_action_distribution.log_prob(dist_logits0, raw_action0).squeeze()
-  log_probs1 = networks[1].parametric_action_distribution.log_prob(dist_logits1, raw_action1).squeeze()
+  log_probs0 = networks[0].parametric_action_distribution.log_prob(dist_logits0, action0)
+  log_probs1 = networks[1].parametric_action_distribution.log_prob(dist_logits1, action1)
 
   # this mask is 0 wherever the episode ended (termination, not truncation)
   mask = data.discount
@@ -237,7 +211,6 @@ class CVPGD:
     """
 
     learning_rate: float = 1e-4
-    entropy_cost: float = 1e-4
     discounting: float = 0.9
     unroll_length: int = 10
     batch_size: int = 32
@@ -246,10 +219,7 @@ class CVPGD:
     num_resets_per_eval: int = 0
     normalize_observations: bool = False
     reward_scaling: float = 1.0
-    clipping_epsilon: float = 0.3
-    gae_lambda: float = 0.95
     deterministic_eval: bool = False
-    normalize_advantage: bool = True
     restore_checkpoint_path: Optional[str] = None
     train_step_multiplier: int = 1
 
@@ -276,7 +246,8 @@ class CVPGD:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = ma_deterministic_po_networks.make_ma_deterministic_po_networks
+        network_factory = functools.partial(ma_po_networks.make_ma_po_networks,
+                                            make_network_fn=ma_po_networks.make_normal_dist_network)
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -352,22 +323,28 @@ class CVPGD:
             preprocess_observations_fn=normalize,
             policy_hidden_layer_sizes=[],
         )
-        make_policies = ma_deterministic_po_networks.make_inference_fns(networks)
+        make_policies = ma_po_networks.make_inference_fns(networks)
 
         optimizer = optax.sgd(learning_rate=self.learning_rate)
 
         agent0_linear_obj_term = functools.partial(
-            compute_deterministic_linear_obj,
+            compute_linear_obj,
             network=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
-            compute_deterministic_linear_obj,
+            compute_linear_obj,
             network=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=1,
+        )
+
+        bilinear_obj_term = functools.partial(
+            compute_bilinear_obj,
+            networks=networks,
+            reward_scaling=self.reward_scaling,
         )
 
         gradient_update_fn = ma_gradients.cgd_update_fn(
@@ -375,6 +352,7 @@ class CVPGD:
             agent1_linear_obj_term,
             bilinear_obj_term,
             optimizer,
+            self.learning_rate,
             pmap_axis_name=_PMAP_AXIS_NAME,
             have_aux=True,
         )
@@ -384,15 +362,16 @@ class CVPGD:
             data: types.Transition,
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
-            optimizer_state, params, key = carry
+            optimizer_state, cgd_state, params, key = carry
             (_, metrics), params, optimizer_state = gradient_update_fn(
                 params,
                 normalizer_params,
                 data,
                 optimizer_state=optimizer_state,
+                cgd_state=cgd_state
             )
 
-            return (optimizer_state, params, key), metrics
+            return (optimizer_state, cgd_state, params, key), metrics
 
         def update_step(
             carry,
@@ -400,7 +379,7 @@ class CVPGD:
             data: types.Transition,
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
-            optimizer_state, params, key = carry
+            optimizer_state, cgd_state, params, key = carry
             key, key_perm, key_grad = jax.random.split(key, 3)
 
             def convert_data(x: jnp.ndarray):
@@ -409,13 +388,13 @@ class CVPGD:
                 return x
 
             shuffled_data = jax.tree_util.tree_map(convert_data, data)
-            (optimizer_state, params, _), metrics = jax.lax.scan(
+            (optimizer_state, cgd_state, params, _), metrics = jax.lax.scan(
                 functools.partial(minibatch_step, normalizer_params=normalizer_params),
-                (optimizer_state, params, key_grad),
+                (optimizer_state, cgd_state, params, key_grad),
                 shuffled_data,
                 length=self.num_minibatches,
             )
-            return (optimizer_state, params, key), metrics
+            return (optimizer_state, cgd_state, params, key), metrics
 
         def training_step(
             carry: Tuple[TrainingState, envs.State, PRNGKey], unused_t
@@ -458,7 +437,7 @@ class CVPGD:
                 pmap_axis_name=_PMAP_AXIS_NAME,
             )
 
-            (optimizer_state, agent_params, _), metrics = jax.lax.scan(
+            (optimizer_state, cgd_state, agent_params, _), metrics = jax.lax.scan(
                 functools.partial(
                     update_step,
                     data=data,
@@ -466,6 +445,7 @@ class CVPGD:
                 ),
                 (
                     training_state.optimizer_state,
+                    training_state.cgd_state,
                     training_state.agent_params,
                     update_key,
                 ),
@@ -475,6 +455,7 @@ class CVPGD:
 
             new_training_state = TrainingState(
                 optimizer_state=optimizer_state,
+                cgd_state=cgd_state,
                 agent_params=agent_params,
                 normalizer_params=normalizer_params,
                 env_steps=training_state.env_steps + utd_ratio,
@@ -538,6 +519,7 @@ class CVPGD:
 
         training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
             optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
+            cgd_state=ma_gradients.cgd_init_state(init_params),
             agent_params=init_params,
             normalizer_params=running_statistics.init_state(
                 specs.Array(env_state.obs.shape[-1:], jnp.dtype("float32"))
