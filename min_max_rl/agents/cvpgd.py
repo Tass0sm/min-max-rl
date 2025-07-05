@@ -1,4 +1,4 @@
-"""Competitive Vanilla Policy Gradient
+"""Competitive Vanilla Policy Gradient Descent
 
 See:
  - https://arxiv.org/abs/1905.12103
@@ -368,7 +368,7 @@ class CVPGD:
                 normalizer_params,
                 data,
                 optimizer_state=optimizer_state,
-                cgd_state=cgd_state
+                cgo_state=cgd_state
             )
 
             return (optimizer_state, cgd_state, params, key), metrics

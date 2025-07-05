@@ -4,6 +4,7 @@ import jax
 import jax.numpy as jnp
 import optax
 import tree_math as tm
+import functools
 
 from jax.tree_util import tree_map, tree_structure, tree_flatten, tree_unflatten
 from jax.flatten_util import ravel_pytree
@@ -73,93 +74,31 @@ def gda_update_fn(
   return f
 
 
-# def value_and_hessian(
-#     f: Callable, *, has_aux: bool = False
-# ) -> Callable[[any], tuple[any, any]]:
-#     """
-#     Returns a function that, given x, returns (value, hessian)
-#     or ((value, aux), hessian) if has_aux=True.
-#     Works for arbitrary pytrees as inputs **and** gradients.
-#     """
-
-#     if has_aux:
-#         # keep only the scalar output for differentiation
-#         def scalar_f(*args, **kwargs):
-#           return f(*args, **kwargs)[0]
-#     else:
-#         def scalar_f(*args, **kwargs):
-#           return f(*args, **kwargs)
-
-#     hess_fn = jax.hessian(scalar_f)
-
-#     @jax.jit
-#     def wrapped(*args, **kwargs):
-#       return f(*args, **kwargs), hess_fn(*args, **kwargs)
-
-#     return wrapped
-
-
-# def loss_and_phessian(
-#     loss_fn: Callable[..., float],
-#     pmap_axis_name: Optional[str],
-#     has_aux: bool = False,
-# ):
-#   h = value_and_hessian(loss_fn, has_aux=has_aux)
-
-#   def ph(*args, **kwargs):
-#     value, hessian = h(*args, **kwargs)
-#     return value, jax.lax.pmean(hessian, axis_name=pmap_axis_name)
-
-#   return h if pmap_axis_name is None else ph
-
-
-# def get_hessian_block(hess, row, col):
-#     """
-#     Extract the block d^2 loss/∂params[col] ∂params[row]  from a
-#     Hessian returned by  jax.hessian(loss)(params)
-
-#     Assumes `params` was a list/tuple (or any indexable container)
-#     whose *top-level* length is >= max(row, col)+1.
-
-#     - The result is a pytree shaped like  params[row]
-#       whose leaves are themselves pytrees shaped like params[col].
-#     """
-#     outer = hess[row]                    # d/dparams[row] (…)
-
-#     # We want to pick element `col` from the *inner* list/tuple
-#     pick_col = lambda inner: inner[col]
-
-#     # Treat every list/tuple as a *leaf* so `tree_map` applies
-#     # `pick_col` exactly once per outer-level leaf, without recursing
-#     # deeper into the inner pytree that `pick_col` returns.
-#     block = jax.tree.map(
-#         pick_col,
-#         outer,
-#         is_leaf=lambda node: isinstance(node, (list, tuple))
-#     )
-
-#     return block
-
-
-class CGDState(NamedTuple):
+class CGOState(NamedTuple):
   old_x: jnp.ndarray
   old_y: jnp.ndarray
   solve_x: bool
 
 
-def cgd_init_state(params):
+CGDState = CGOState
+
+
+def cgo_init_state(params):
   x, y = params
   return CGDState(old_x=x, old_y=y, solve_x=True)
 
 
-def solve_for_cgd_update(
+cgd_init_state = cgo_init_state
+
+
+def solve_for_cgo_update(
     f: Callable[[any, any], jnp.ndarray],
     x: any,
     y: any,
     grad_x: any,
     grad_y: any,
     hessian_xy_mult_grad_y: any,
-    eta: float,
+    alpha: float,
     nsteps: int = 100,
     init: any = None,
     for_x: bool = True,
@@ -167,19 +106,19 @@ def solve_for_cgd_update(
 ) -> any:
     """
     Solves the linear system:
-        (I + eta^2 D_{xy} f D_{yx} f) Δx = -∇ₓ f - η D_{xy} f ∇ᵧ f
-    and returns Δx as a pytree.
+        (I + alpha^2 D_{xy} f D_{yx} f) x_delta = -D_x f - alpha D_{xy} f D_y f
+    and returns x_delta as a pytree.
     """
 
     # compute RHS b = -grad_x - eta * D_xy grad_y
-    b = jax.tree.map(lambda a, b: -a - eta * b, grad_x, hessian_xy_mult_grad_y)
+    b = jax.tree.map(lambda a, b: -a - alpha * b, grad_x, hessian_xy_mult_grad_y)
     b_vec = tm.Vector(b)
 
-    # define matvec: v ↦ (I + eta² D_{xy} D_{yx}) v
+    # define matvec: v -> (I + alpha^2 D_{xy} D_{yx}) v
     def matvec(v):
         hvp_1, _ = cross_hvp(f, x, y, v.tree, order="yx")
         hvp_2, _ = cross_hvp(f, x, y, hvp_1, order="xy")
-        return v + eta**2 * tm.Vector(hvp_2)
+        return v + alpha**2 * tm.Vector(hvp_2)
 
     # initial CG state
     xk = tm.Vector(jax.tree.map(jnp.zeros_like, b)) if init is None else tm.Vector(init)
@@ -211,13 +150,14 @@ def solve_for_cgd_update(
     return xk_final.tree
 
 
-def cgd_update_fn(
+def cgo_update_fn(
     agent0_linear_loss_term,
     agent1_linear_loss_term,
     bilinear_loss_term,
     optimizer: optax.GradientTransformation,
     eta: float,
     pmap_axis_name: Optional[str],
+    alpha: Optional[float] = None,
     have_aux: bool = False,
 ):
   """Wrapper of the loss function that apply gradient updates.
@@ -228,6 +168,8 @@ def cgd_update_fn(
     pmap_axis_name: If relevant, the name of the pmap axis to synchronize
       gradients.
     have_aux: Whether the loss_fns have auxiliary data.
+    eta: learning rate
+    alpha: bilinear term sensitivity term
 
   Returns:
     A function that takes the same argument as the loss function plus the
@@ -242,7 +184,10 @@ def cgd_update_fn(
     agent1_linear_loss_term, pmap_axis_name=pmap_axis_name, has_aux=have_aux
   )
 
-  def f(*args, optimizer_state, cgd_state):
+  if alpha is None:
+    alpha = eta
+
+  def f(*args, optimizer_state, cgo_state):
     xy_arg, rest = args[0], args[1:]
     x, y = xy_arg
     x_result, grad_x = agent0_linear_loss_and_pgrad_fn(x, *rest)
@@ -268,22 +213,22 @@ def cgd_update_fn(
       has_aux=have_aux,
     )
 
-    def solve_for_x(cgd_state):
-      delta_x = solve_for_cgd_update(diadic_bilinear_loss_term, x, y, grad_x, grad_y, hvp_x,
-                                     eta, for_x=True)
+    def solve_for_x(cgo_state):
+      delta_x = solve_for_cgo_update(diadic_bilinear_loss_term, x, y, grad_x, grad_y, hvp_x,
+                                     alpha, for_x=True)
       d_yx_mult_delta_x, _ = cross_hvp(diadic_bilinear_loss_term, x, y, delta_x)
       delta_y = tm.Vector(grad_y) + eta * tm.Vector(d_yx_mult_delta_x)
-      return [delta_x, delta_y.tree], cgd_state._replace(old_y=delta_y.tree)
+      return [delta_x, delta_y.tree], cgo_state._replace(old_y=delta_y.tree)
 
-    def solve_for_y(cgd_state):
-      delta_y = solve_for_cgd_update(diadic_bilinear_loss_term, y, x, grad_y, grad_x, hvp_y,
-                                     eta, for_x=False)
+    def solve_for_y(cgo_state):
+      delta_y = solve_for_cgo_update(diadic_bilinear_loss_term, y, x, grad_y, grad_x, hvp_y,
+                                     alpha, for_x=False)
       d_xy_mult_delta_y, _ = cross_hvp(diadic_bilinear_loss_term, x, y, delta_y)
       delta_x = tm.Vector(grad_x) - eta * tm.Vector(d_xy_mult_delta_y)
-      return [delta_x.tree, delta_y], cgd_state._replace(old_x=delta_x.tree)
+      return [delta_x.tree, delta_y], cgo_state._replace(old_x=delta_x.tree)
 
-    delta_xy, cgd_state = jax.lax.cond(cgd_state.solve_x, solve_for_x, solve_for_y, cgd_state)
-    cgd_state = cgd_state._replace(solve_x=~cgd_state.solve_x)
+    delta_xy, cgo_state = jax.lax.cond(cgo_state.solve_x, solve_for_x, solve_for_y, cgo_state)
+    cgo_state = cgo_state._replace(solve_x=~cgo_state.solve_x)
 
     params_update, optimizer_state = optimizer.update(delta_xy, optimizer_state, params=xy_arg)
     params = optax.apply_updates(xy_arg, params_update)
@@ -298,3 +243,6 @@ def cgd_update_fn(
     return result, params, optimizer_state
 
   return f
+
+
+cgd_update_fn = functools.partial(cgo_update_fn, alpha=None)

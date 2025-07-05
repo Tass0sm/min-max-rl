@@ -63,7 +63,7 @@ def cvpgo_train(run, env, seed, run_params: dict = {}):
         env,
         seed,
         agent_class=CVPGO,
-        alg_hps=env.cvpgd_hps,
+        alg_hps=env.cvpgo_hps,
         run_params=run_params,
         progress_fn=progress_fn,
         extras={}
