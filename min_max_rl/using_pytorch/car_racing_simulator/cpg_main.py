@@ -5,13 +5,19 @@ import numpy as np
 import json
 import sys
 
-import dpg_orca.VehicleModel as VehicleModel
-import dpg_orca.Track as Track
-from dpg_orca.pure_pursuit import State, cpg_controller, calc_target_index
+from importlib import resources
+
+from .. import car_racing_simulator
+from . import VehicleModel
+from . import Track
+from .pure_pursuit import State, cpg_controller, calc_target_index
+
 
 if __name__ == '__main__':
     sys.stdout.write("Hello\n")
-    config = json.load(open('config.json'))
+
+    config_path = str(resources.files(car_racing_simulator) / "config.json")
+    config = json.load(open(config_path))
     track1 = Track.Track(config)
 
     # device = torch.device("cuda:0" if (torch.cuda.is_available()) else "cpu")
@@ -20,8 +26,6 @@ if __name__ == '__main__':
     vehicle_model = VehicleModel.VehicleModel(config["n_batch"], device, config)
 
     x0 = torch.zeros(config["n_batch"], config["n_state"])
-
-
     u0 = torch.zeros(config["n_batch"], config["n_control"])
 
     state = State(x=track1.X[3], y=track1.Y[3], yaw=0.0, v=0.0)
@@ -54,13 +58,13 @@ if __name__ == '__main__':
 
 
         u0 = torch.FloatTensor([[d,delta]])
-        x0 = vehicle_model.dynModelBlend(x0, u0)
+        x0 = vehicle_model.dynModelBlendBatch(x0, u0)
         curvilinear_coordinates.append(x0.detach().numpy().reshape(6, ))
         global_coordinates.append(track1.fromLocaltoGlobal(x0.detach().numpy().reshape(6,)))
         inputs.append(np.array([d,delta]))
         state.x, state.y, state.yaw = track1.fromLocaltoGlobal(x0.detach().numpy().reshape(6,))
         state.v = x0[:,3].detach().numpy()
-        state_data.append([state.x,state.y,state.yaw,state.v])
+        state_data.append(np.concatenate([np.stack([state.x,state.y,state.yaw]), state.v]))
 
         if x0[0,0]>20:
             break
@@ -117,7 +121,7 @@ if __name__ == '__main__':
     plt.title('inputs')
     plt.show()
 
-    state_data = np.array(state_data)
+    state_data = np.stack(state_data)
     plt.plot(state_data[:,0])
     plt.plot(state_data[:, 1])
     plt.plot(state_data[:, 2])
@@ -125,10 +129,3 @@ if __name__ == '__main__':
     plt.show()
 
     temp=1
-
-
-
-
-
-
-

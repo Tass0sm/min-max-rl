@@ -14,7 +14,6 @@ from .. import car_racing
 from min_max_rl.using_pytorch.copg_optim.critic_functions import critic_update, get_advantage
 from min_max_rl.using_pytorch.copg_optim import RCoPG as CoPG
 from min_max_rl.using_pytorch.car_racing_simulator import VehicleModel
-from min_max_rl.using_pytorch.car_racing_simulator import Track
 from .network import Actor, Critic
 from .orca_env_function import getreward, getdone, getfreezereward, getfreezecollosionreward, getfreezecollosionReachedreward, getfreezeTimecollosionReachedreward
 

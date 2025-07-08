@@ -35,8 +35,6 @@ def main():
     config_path = str(car_racing_path / "config.json")
     config = json.load(open(config_path))
 
-    breakpoint()
-
     track1 = Track.Track(config)
     
     device = torch.device("cpu")
@@ -89,7 +87,6 @@ def main():
     
         dist1 = p1(torch.cat([state_c1[:, 0:5], state_c2[:, 0:5]], dim=1))
         action1 = dist1.sample()
-    
     
         dist2 = p2(torch.cat([state_c2[:, 0:5], state_c1[:, 0:5]], dim=1))
         action2 = dist2.sample()
