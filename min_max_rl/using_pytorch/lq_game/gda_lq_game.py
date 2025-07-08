@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .lq_game import LQ_game
 from .network import policy1, policy2
 from .network import critic
-from min_max_rl.using_pytorch.copg_optim.critic_functions import critic_update, get_advantage
+from min_max_rl.using_pytorch.optim.critic_functions import critic_update, get_advantage
 
 
 def main():
