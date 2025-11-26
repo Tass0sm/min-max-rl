@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--total_env_steps', type=int, default=1000000, help='Number of timesteps allowed for training.')
     parser.add_argument('--num_envs', type=int, default=1, help='Number of environments across which to vectorize.')
     parser.add_argument('--num_evals', type=int, default=16, help='Number of evaluations to perform and log during training.')
+    parser.add_argument('--episode_length', type=int, default=100, help='Number of steps after which environment rollouts are terminated.')
     parser.add_argument('--seed', type=int, default=0, help='Seed for randomness in training.')
     args = parser.parse_args()
 
@@ -53,6 +54,7 @@ def main():
         total_env_steps=args.total_env_steps,
         num_envs=args.num_envs,
         num_evals=args.num_evals,
+        episode_length=args.episode_length
         # **run_params
     )
 
