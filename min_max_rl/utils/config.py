@@ -1,9 +1,9 @@
 from typing import Literal, Optional, Union
 
-from flax.struct import dataclass
+from flax import struct
 
 
-@dataclass
+@struct.dataclass
 class RunConfig:
     """General run configs
     Args:
@@ -28,9 +28,6 @@ class RunConfig:
         num_evals: the number of evals to run during the entire training run.
             Increasing the number of evals increases total training time
     """
-
-    # environment to use
-    env: any
 
     # total number of environment steps to run
     total_env_steps: int = 50_000_000
