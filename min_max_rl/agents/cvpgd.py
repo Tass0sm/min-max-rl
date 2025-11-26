@@ -101,7 +101,7 @@ def compute_linear_obj(
 
   log_probs = network.parametric_action_distribution.log_prob(dist_logits, action)
 
-  linear_obj = (-log_probs * positive_returns).mean()
+  linear_obj = (log_probs * positive_returns).mean()
 
   mean_action_mode = network.parametric_action_distribution.mode(dist_logits).mean()
   mean_action_noise_scale = network.parametric_action_distribution.create_dist(dist_logits).scale.mean()
