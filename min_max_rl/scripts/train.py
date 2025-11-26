@@ -1,179 +1,76 @@
+import argparse
+import tempfile
+from typing import Optional
+from pathlib import Path
+
 import mlflow
 
 from brax.io import model
 
+from min_max_rl import agents
 from min_max_rl.envs import get_env
 from min_max_rl.utils import RunConfig
-from min_max_rl.agents.cvpgd import CVPGD
-from min_max_rl.agents.cvpgo import CVPGO
-from min_max_rl.agents.vpgda import VPGDA
-
-from min_max_rl.agents.dpgda import DPGDA
-from min_max_rl.agents.cdpgd import CDPGD
-
-
-def progress_fn(num_steps, metrics, *args, **kwargs):
-    print(f"Logging for {num_steps}")
-    print(metrics)
-    mlflow.log_metrics(metrics, step=num_steps)
-
-
-def training_run(run_id, env, seed, agent_class, progress_fn=progress_fn, alg_hps={}, run_params={}, extras={}):
-    agent = agent_class(**alg_hps)
-
-    alg_hps = {
-        **alg_hps,
-        "seed": seed,
-    }
-
-    mlflow.log_params(alg_hps)
-
-    run_config = RunConfig(
-        env=env,
-        seed=seed,
-        **run_params
-    )
-
-    make_inference_fn, params, _ = agent.train_fn(
-        run_config,
-        env,
-        progress_fn=progress_fn,
-        **extras
-    )
-
-    with mlflow.MlflowClient()._log_artifact_helper(run_id, 'policy_params') as tmp_path:
-        model.save_params(tmp_path, params)
-
-    return make_inference_fn, params
-
-
-def train_for_all(envs, func, alg_tag, seed_range=(0, 3), extra_envs={}, **kwargs):
-    for env_name in envs:
-        env = get_env(env_name, extra_envs=extra_envs)
-        env_tag = type(env).__name__
-
-        for seed in range(*seed_range):
-            with mlflow.start_run(tags={"env": env_tag, "alg": alg_tag}) as run:
-                func(run, env, seed, **kwargs)
-
-
-def cvpgo_train(run, env, seed, run_params: dict = {}):
-    return training_run(
-        run.info.run_id,
-        env,
-        seed,
-        agent_class=CVPGO,
-        alg_hps=env.cvpgo_hps,
-        run_params=run_params,
-        progress_fn=progress_fn,
-        extras={}
-    )
-
-
-def cvpgd_train(run, env, seed, run_params: dict = {}):
-    return training_run(
-        run.info.run_id,
-        env,
-        seed,
-        agent_class=CVPGD,
-        alg_hps=env.cvpgd_hps,
-        run_params=run_params,
-        progress_fn=progress_fn,
-        extras={}
-    )
-
-
-def vpgda_train(run, env, seed, run_params: dict = {}):
-    return training_run(
-        run.info.run_id,
-        env,
-        seed,
-        agent_class=VPGDA,
-        alg_hps=env.vpgda_hps,
-        run_params=run_params,
-        progress_fn=progress_fn,
-        extras={}
-    )
-
-
-def dpgda_train(run, env, seed, run_params: dict = {}):
-    return training_run(
-        run.info.run_id,
-        env,
-        seed,
-        agent_class=DPGDA,
-        alg_hps=env.dpgda_hps,
-        run_params=run_params,
-        progress_fn=progress_fn,
-        extras={}
-    )
-
-def cdpgd_train(run, env, seed, run_params: dict = {}):
-    return training_run(
-        run.info.run_id,
-        env,
-        seed,
-        agent_class=CDPGD,
-        alg_hps=env.cdpgd_hps,
-        run_params=run_params,
-        progress_fn=progress_fn,
-        extras={}
-    )
 
 
 def main():
-    max_seed = 1
+    parser = argparse.ArgumentParser(description="General training script for agents.")
+    parser.add_argument('--agent', type=str, help='Name of agent for training.')
+    parser.add_argument('--env', type=str, help='Name of environment to consider for training.')
 
-    # train_for_all(["LQGame"], gda_po_train, "GDA_PO", seed_range=(0, max_seed), run_params = {
-    #     "total_env_steps": 5_000_000,
-    #     # "episode_length": None,
-    #     "num_envs": 100,
-    #     # "num_eval_envs": None,
-    #     "num_evals": 10,
-    #     # "action_repeat": None,
-    #     # "max_devices_per_host": None,
-    # })
+    # run config arguments
+    parser.add_argument('--total_env_steps', type=int, default=1000000, help='Number of timesteps allowed for training.')
+    parser.add_argument('--num_envs', type=int, default=1, help='Number of environments across which to vectorize.')
+    parser.add_argument('--num_evals', type=int, default=16, help='Number of evaluations to perform and log during training.')
+    parser.add_argument('--seed', type=int, default=0, help='Seed for randomness in training.')
+    args = parser.parse_args()
 
+    if hasattr(agents, args.agent):
+        AgentClass = getattr(agents, args.agent)
+    else:
+        raise NotImplementedError(f"Agent {args.agent} not found")
 
-    # train_for_all(["Bilinear"], vpgda_train, "VPGDA", seed_range=(0, max_seed), run_params = {
-    #     "total_env_steps": 1_000_000,
-    #     "episode_length": 1,
-    #     "num_envs": 128,
-    #     "num_eval_envs": 128,
-    #     "num_evals": 50,
-    #     # "action_repeat": None,
-    #     # "max_devices_per_host": None,
-    # })
+    def progress_fn(current_step, metrics, *args, **kwargs):
+        print(f"Logging for {current_step}")
+        print(metrics)
+        mlflow.log_metrics(metrics, step=current_step)
 
-    train_for_all(["Bilinear"], cdpgd_train, "CDPGD", seed_range=(0, max_seed), run_params = {
-        "total_env_steps": 1_000_000,
-        "episode_length": 1,
-        "num_envs": 128,
-        "num_eval_envs": 128,
-        "num_evals": 50,
-        # "action_repeat": None,
-        # "max_devices_per_host": None,
-    })
+        # params = kwargs["params"]
 
-    # train_for_all(["Bilinear"], dpgda_train, "DPGDA", seed_range=(0, max_seed), run_params = {
-    #     "total_env_steps": 1_000_000,
-    #     "episode_length": 1,
-    #     "num_envs": 1,
-    #     "num_eval_envs": 1,
-    #     "num_evals": 50,
-    #     # "action_repeat": None,
-    #     # "max_devices_per_host": None,
-    # })
+        # # save params to temporary directory and then log the saved file to store in mlflow
+        # with tempfile.TemporaryDirectory() as tmp_dir:
+        #     path = Path(tmp_dir, f"policy_params_{current_step}")
+        #     model.save_params(path, params)
+        #     mlflow.log_artifact(path)
 
-    # train_for_all(["Bilinear"], gda_po_train, "GDA_PO", seed_range=(0, max_seed), run_params = {
-    #     "total_env_steps": 5_000_000,
-    #     "episode_length": 1,
-    #     "num_envs": 256,
-    #     "num_eval_envs": 256,
-    #     "num_evals": 1000,
-    #     # "action_repeat": None,
-    #     # "max_devices_per_host": None,
-    # })
+    env = get_env(args.env)
+
+    agent_hps = getattr(env, f"{args.agent.lower()}_hps")
+
+    agent = AgentClass(**agent_hps)
+
+    run_config = RunConfig(
+        seed=args.seed,
+        total_env_steps=args.total_env_steps,
+        num_envs=args.num_envs,
+        num_evals=args.num_evals,
+        # **run_params
+    )
+
+    with mlflow.start_run(tags={"env": args.env, "agent": args.agent}) as run:
+
+        mlflow.log_params(agent_hps)
+
+        make_policy, params, metrics = agent.train_fn(
+            config=run_config,
+            train_env=env,
+            progress_fn=progress_fn
+        )
+
+        # # save params to temporary directory and then log the saved file to store in mlflow
+        # with tempfile.TemporaryDirectory() as tmp_dir:
+        #     path = Path(tmp_dir, f"policy_params")
+        #     model.save_params(path, params)
+        #     mlflow.log_artifact(path)
 
 
 if __name__ == "__main__":
