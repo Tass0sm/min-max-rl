@@ -46,6 +46,7 @@ class TrainingState:
     """Contains training state for the learner."""
 
     optimizer_state: optax.OptState
+    cgd_state: ma_gradients.CGDState
     agent_params: list[PONetworkParams]
     normalizer_params: running_statistics.RunningStatisticsState
     env_steps: jnp.ndarray
@@ -66,10 +67,12 @@ def _strip_weak_type(tree):
 
 
 def compute_deterministic_linear_obj(
-        params: PONetworkParams,
+        params_a: PONetworkParams,
+        params_b: PONetworkParams,
         normalizer_params: any,
         data: types.Transition,
-        network: ppo_networks.PPONetworks,
+        network_a: ppo_networks.PPONetworks,
+        network_b: ppo_networks.PPONetworks,
         reward_scaling: float = 1.0,
         agent_idx: int = 0,
 ) -> Tuple[jnp.ndarray, types.Metrics]:
@@ -87,14 +90,10 @@ def compute_deterministic_linear_obj(
     A tuple (loss, metrics)
   """
 
-  def closed_form_action_value_function(state, agent_i_action, other_agent_action):
-      # order doesn't matter and horizon = 1
-      return agent_i_action[0] * other_agent_action[1]
+  agent_a_action = network_a.policy_network.apply(normalizer_params, params_a.policy, data.observation)
+  agent_b_action = network_b.policy_network.apply(normalizer_params, params_b.policy, data.observation)
 
-  agent_i_action = network.policy_network.apply(normalizer_params, params.policy, data.observation)
-  other_agent_action = data.action[..., 1-agent_idx, None]
-
-  linear_obj = closed_form_action_value_function(data.observation, agent_i_action, other_agent_action).mean()
+  linear_obj = (agent_a_action * agent_b_action).mean()
 
   return linear_obj, {
       f'linear_obj{agent_idx}': linear_obj,
@@ -122,42 +121,16 @@ def compute_deterministic_bilinear_obj(
     A tuple (loss, metrics)
   """
 
-  return_per_agent = data.reward.sum(axis=1) * reward_scaling
-  positive_returns = return_per_agent[..., 0, None]
+  def closed_form_action_value_function(state, agent_0_action, agent_1_action):
+      # order doesn't matter and horizon = 1
+      return agent_0_action[0] * agent_1_action[0]
 
-  raw_action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
-  raw_action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
+  agent_0_action = networks[0].policy_network.apply(normalizer_params, params[0].policy, data.observation)
+  agent_1_action = networks[1].policy_network.apply(normalizer_params, params[1].policy, data.observation)
 
-  dist_logits0 = networks[0].policy_network.apply(normalizer_params, params[0].policy, data.observation)
-  dist_logits1 = networks[1].policy_network.apply(normalizer_params, params[1].policy, data.observation)
-
-  log_probs0 = networks[0].parametric_action_distribution.log_prob(dist_logits0, raw_action0).squeeze()
-  log_probs1 = networks[1].parametric_action_distribution.log_prob(dist_logits1, raw_action1).squeeze()
-
-  # this mask is 0 wherever the episode ended (termination, not truncation)
-  mask = data.discount
-
-  def cumsum_with_pad_and_mask(xs, mask):
-      xs_and_mask = jnp.stack((xs, mask), axis=-1)
-
-      def f(carry, x_and_mask):
-          x, mask = x_and_mask
-          # if mask is zero, the cumsum is reset to zero
-          result = (carry + x) * mask
-          return result, result
-
-      _, out = jax.lax.scan(f, 0.0, xs_and_mask)
-      padded_out = jnp.pad(out, ((1, 0)), mode='constant', constant_values=0.0)[:-1]
-      return padded_out
-
-  s_log_probs0 = jax.vmap(cumsum_with_pad_and_mask)(log_probs0, mask)
-  s_log_probs1 = jax.vmap(cumsum_with_pad_and_mask)(log_probs1, mask)
-
-  # TOTAL OBJECTIVE (For Bilinear Terms)
-
-  bilinear_obj_1 = (log_probs0 * log_probs1 * positive_returns).mean()
-  bilinear_obj_2 = (s_log_probs0[1:]*log_probs1[1:]*positive_returns[1:]).mean()
-  bilinear_obj_3 = (log_probs0[1:]*s_log_probs1[1:]*positive_returns[1:]).mean()
+  bilinear_obj_1 = jax.vmap(closed_form_action_value_function)(data.observation, agent_0_action, agent_1_action).mean()
+  bilinear_obj_2 = 0.0
+  bilinear_obj_3 = 0.0
 
   bilinear_obj = bilinear_obj_1 + bilinear_obj_2 + bilinear_obj_3
 
@@ -308,22 +281,32 @@ class CDPGD:
 
         agent0_linear_obj_term = functools.partial(
             compute_deterministic_linear_obj,
-            network=networks[0],
+            network_a=networks[0],
+            network_b=networks[1],
             reward_scaling=self.reward_scaling,
             agent_idx=0,
         )
 
         agent1_linear_obj_term = functools.partial(
             compute_deterministic_linear_obj,
-            network=networks[1],
+            network_a=networks[1],
+            network_b=networks[0],
             reward_scaling=self.reward_scaling,
             agent_idx=1,
         )
 
-        gradient_update_fn = ma_gradients.gda_update_fn(
+        bilinear_obj_term = functools.partial(
+            compute_deterministic_bilinear_obj,
+            networks=networks,
+            reward_scaling=self.reward_scaling,
+        )
+
+        gradient_update_fn = ma_gradients.cgd_update_fn(
             agent0_linear_obj_term,
             agent1_linear_obj_term,
+            bilinear_obj_term,
             optimizer,
+            self.learning_rate,
             pmap_axis_name=_PMAP_AXIS_NAME,
             have_aux=True,
         )
@@ -333,15 +316,16 @@ class CDPGD:
             data: types.Transition,
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
-            optimizer_state, params, key = carry
+            optimizer_state, cgd_state, params, key = carry
             (_, metrics), params, optimizer_state = gradient_update_fn(
                 params,
                 normalizer_params,
                 data,
                 optimizer_state=optimizer_state,
+                cgo_state=cgd_state
             )
 
-            return (optimizer_state, params, key), metrics
+            return (optimizer_state, cgd_state,  params, key), metrics
 
         def update_step(
             carry,
@@ -349,7 +333,7 @@ class CDPGD:
             data: types.Transition,
             normalizer_params: running_statistics.RunningStatisticsState,
         ):
-            optimizer_state, params, key = carry
+            optimizer_state, cgd_state, params, key = carry
             key, key_perm, key_grad = jax.random.split(key, 3)
 
             def convert_data(x: jnp.ndarray):
@@ -358,13 +342,13 @@ class CDPGD:
                 return x
 
             shuffled_data = jax.tree_util.tree_map(convert_data, data)
-            (optimizer_state, params, _), metrics = jax.lax.scan(
+            (optimizer_state, cgd_state, params, _), metrics = jax.lax.scan(
                 functools.partial(minibatch_step, normalizer_params=normalizer_params),
-                (optimizer_state, params, key_grad),
+                (optimizer_state, cgd_state, params, key_grad),
                 shuffled_data,
                 length=self.num_minibatches,
             )
-            return (optimizer_state, params, key), metrics
+            return (optimizer_state, cgd_state, params, key), metrics
 
         def training_step(
             carry: Tuple[TrainingState, envs.State, PRNGKey], unused_t
@@ -407,7 +391,7 @@ class CDPGD:
                 pmap_axis_name=_PMAP_AXIS_NAME,
             )
 
-            (optimizer_state, agent_params, _), metrics = jax.lax.scan(
+            (optimizer_state, cgd_state, agent_params, _), metrics = jax.lax.scan(
                 functools.partial(
                     update_step,
                     data=data,
@@ -415,6 +399,7 @@ class CDPGD:
                 ),
                 (
                     training_state.optimizer_state,
+                    training_state.cgd_state,
                     training_state.agent_params,
                     update_key,
                 ),
@@ -424,6 +409,7 @@ class CDPGD:
 
             new_training_state = TrainingState(
                 optimizer_state=optimizer_state,
+                cgd_state=cgd_state,
                 agent_params=agent_params,
                 normalizer_params=normalizer_params,
                 env_steps=training_state.env_steps + utd_ratio,
@@ -487,6 +473,7 @@ class CDPGD:
 
         training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
             optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
+            cgd_state=ma_gradients.cgd_init_state(init_params),
             agent_params=init_params,
             normalizer_params=running_statistics.init_state(
                 specs.Array(env_state.obs.shape[-1:], jnp.dtype("float32"))

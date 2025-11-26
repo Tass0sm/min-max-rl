@@ -8,7 +8,7 @@ See:
 import functools
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple, Union
 
 import flax
@@ -71,6 +71,7 @@ def _strip_weak_type(tree):
 
 def compute_linear_obj(
         params: PONetworkParams,
+        _: PONetworkParams,
         normalizer_params: any,
         data: types.Transition,
         network: ppo_networks.PPONetworks,
@@ -94,8 +95,7 @@ def compute_linear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  # action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
-  action = data.action[..., agent_idx, None]
+  action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
 
   dist_logits = network.policy_network.apply(normalizer_params, params.policy, data.observation)
 
@@ -137,11 +137,8 @@ def compute_bilinear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  # action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
-  action0 = data.action[..., 0, None]
-
-  # action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
-  action1 = data.action[..., 1, None]
+  action0 = data.extras["ma_agent_extras"]["agent0_raw_action"]
+  action1 = data.extras["ma_agent_extras"]["agent1_raw_action"]
 
   dist_logits0 = networks[0].policy_network.apply(normalizer_params, params[0].policy, data.observation)
   dist_logits1 = networks[1].policy_network.apply(normalizer_params, params[1].policy, data.observation)
@@ -223,6 +220,7 @@ class CVPGO:
     deterministic_eval: bool = False
     restore_checkpoint_path: Optional[str] = None
     train_step_multiplier: int = 1
+    policy_layers: list[int] = field(default_factory=lambda: [128, 128])
 
     def train_fn(
         self,
@@ -322,7 +320,7 @@ class CVPGO:
             env_state.obs.shape[-1],
             env.action_size,
             preprocess_observations_fn=normalize,
-            policy_hidden_layer_sizes=[],
+            policy_hidden_layer_sizes=self.policy_layers,
         )
         make_policies = ma_po_networks.make_inference_fns(networks)
 
