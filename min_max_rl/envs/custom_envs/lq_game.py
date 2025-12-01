@@ -1,3 +1,4 @@
+import functools
 from typing import Optional, Dict, Any
 
 import jax
@@ -6,6 +7,8 @@ from flax import struct
 
 from brax.envs import base
 from brax.envs.base import Env, State
+
+from min_max_rl.networks import ma_po_networks
 
 
 class LQGame(Env):
@@ -22,7 +25,7 @@ class LQGame(Env):
         self.W21 = jnp.array([[1.0]])
 
     def reset(self, rng: jax.Array) -> State:
-        obs = jnp.zeros((self.n, 1))
+        obs = jnp.zeros((self.n,))
         reward = jnp.zeros((2,))  # one reward per player
         done = jnp.array(False)
         return State(
@@ -38,11 +41,12 @@ class LQGame(Env):
         # assumes that state might have leading dimensions of size one 
         a1 = action[..., :self.d].reshape((self.d, 1))
         a2 = action[..., self.d:].reshape((self.d, 1))
-        x = state.obs
+        x = state.obs.reshape((self.n, 1))
 
         x_next = self.A @ x + self.B1 @ a1 - self.B2 @ a2
+        x_next = x_next.reshape((self.n,))
         r0 = -a1**2 + a2**2 + x_next**2
-        reward = jnp.stack([r0.squeeze(), r0.squeeze()])
+        reward = jnp.stack([r0.squeeze(), -r0.squeeze()])
         done = jnp.array(False)
 
         return state.replace(
@@ -57,54 +61,101 @@ class LQGame(Env):
 
     @property
     def action_size(self) -> int:
-        return self.d  # two players
+        return self.d  # action size per players
 
     @property
     def backend(self) -> str:
         return "none"
 
     #
+    # NETWORK FACTORY
+    #
+
+    @property
+    def network_factory(self):
+        make_network_fn = functools.partial(
+            ma_po_networks.make_normal_dist_network,
+            bias=False
+        )
+
+        return functools.partial(
+            ma_po_networks.make_ma_po_networks,
+            make_network_fn=make_network_fn
+        )
+
+    #
     # HYPERPARAMETERS
     #
 
     @property
-    def cgd_po_hps(self):
+    def vpgda_hps(self):
         return {
             "learning_rate": 1e-4,
-            "entropy_cost": 1e-4,
             "discounting": 0.9,
             "unroll_length": 5,
-            "batch_size": 1000,
+            "batch_size": 1000, # 1000 trajectories of length 5
             "num_minibatches": 1,
-            "num_updates_per_batch": 2,
+            "num_updates_per_batch": 1,
             "num_resets_per_eval": 0,
             "normalize_observations": False,
             "reward_scaling": 1.0,
-            "clipping_epsilon": 0.3,
-            "gae_lambda": 0.95,
             "deterministic_eval": False,
-            "normalize_advantage": True,
             "restore_checkpoint_path": None,
             "train_step_multiplier": 1,
+            "policy_layers": [],
         }
 
     @property
-    def gda_po_hps(self):
+    def evpg_hps(self):
         return {
             "learning_rate": 1e-4,
-            "entropy_cost": 1e-4,
             "discounting": 0.9,
             "unroll_length": 5,
-            "batch_size": 1000,
+            "batch_size": 1000, # 1000 trajectories of length 5
             "num_minibatches": 1,
-            "num_updates_per_batch": 2,
+            "num_updates_per_batch": 1,
             "num_resets_per_eval": 0,
             "normalize_observations": False,
             "reward_scaling": 1.0,
-            "clipping_epsilon": 0.3,
-            "gae_lambda": 0.95,
             "deterministic_eval": False,
-            "normalize_advantage": True,
             "restore_checkpoint_path": None,
             "train_step_multiplier": 1,
+            "policy_layers": [],
+        }
+
+    @property
+    def cvpgd_hps(self):
+        return {
+            "learning_rate": 1e-2,
+            "discounting": 0.9,
+            "unroll_length": 5,
+            "batch_size": 1000, # 1000 trajectories of length 5
+            "num_minibatches": 1,
+            "num_updates_per_batch": 1,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
+            "deterministic_eval": False,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+            "policy_layers": [],
+        }
+
+    @property
+    def cvpgo_hps(self):
+        return {
+            "learning_rate": 1e-2,
+            "alpha": 1.0,
+            "discounting": 0.9,
+            "unroll_length": 5,
+            "batch_size": 1000, # 1000 trajectories of length 5
+            "num_minibatches": 1,
+            "num_updates_per_batch": 1,
+            "num_resets_per_eval": 0,
+            "normalize_observations": False,
+            "reward_scaling": 1.0,
+            "deterministic_eval": False,
+            "restore_checkpoint_path": None,
+            "train_step_multiplier": 1,
+            "policy_layers": [],
         }

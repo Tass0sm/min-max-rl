@@ -245,8 +245,6 @@ class CVPGO:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = functools.partial(ma_po_networks.make_ma_po_networks,
-                                            make_network_fn=ma_po_networks.make_normal_dist_network)
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -315,7 +313,7 @@ class CVPGO:
 
         num_agents = 2
 
-        networks = network_factory(
+        networks = train_env.network_factory(
             num_agents,
             env_state.obs.shape[-1],
             env.action_size,

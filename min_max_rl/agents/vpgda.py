@@ -4,7 +4,7 @@
 import functools
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple, Union
 
 import flax
@@ -89,8 +89,8 @@ def compute_linear_obj(
   return_per_agent = data.reward.sum(axis=1) * reward_scaling
   positive_returns = return_per_agent[..., 0, None]
 
-  # action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
-  action = data.action[..., agent_idx, None]
+  action = data.extras["ma_agent_extras"][f"agent{agent_idx}_raw_action"]
+  # action = data.action[..., agent_idx, None]
 
   dist_logits = network.policy_network.apply(normalizer_params, params.policy, data.observation)
 
@@ -144,6 +144,7 @@ class VPGDA:
     deterministic_eval: bool = False
     restore_checkpoint_path: Optional[str] = None
     train_step_multiplier: int = 1
+    policy_layers: list[int] = field(default_factory=lambda: [128, 128])
 
     def train_fn(
         self,
@@ -168,8 +169,6 @@ class VPGDA:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = functools.partial(ma_po_networks.make_ma_po_networks,
-                                            make_network_fn=ma_po_networks.make_normal_dist_network)
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -238,12 +237,12 @@ class VPGDA:
 
         num_agents = 2
 
-        networks = network_factory(
+        networks = train_env.network_factory(
             num_agents,
             env_state.obs.shape[-1],
             env.action_size,
             preprocess_observations_fn=normalize,
-            policy_hidden_layer_sizes=[],
+            policy_hidden_layer_sizes=self.policy_layers,
         )
         make_policies = ma_po_networks.make_inference_fns(networks)
 
@@ -338,6 +337,7 @@ class VPGDA:
                 (),
                 length=self.batch_size * self.num_minibatches // config.num_envs,
             )
+
             # Have leading dimensions (batch_size * num_minibatches, unroll_length)
             data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), data)
             data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data)

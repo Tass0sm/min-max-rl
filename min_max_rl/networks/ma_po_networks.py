@@ -52,7 +52,7 @@ class NormalDistribution(distribution.ParametricDistribution):
 
   def create_dist(self, parameters):
     loc = parameters
-    scale = jnp.ones_like(loc) * 1.0
+    scale = jnp.ones_like(loc) * 1.22140275816
     return distribution.NormalDistribution(loc=loc, scale=scale)
 
 
@@ -80,6 +80,8 @@ def make_normal_dist_network(
     policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
     activation: networks.ActivationFn = linen.swish,
     bias_init = jax.nn.initializers.constant(1.0),
+    bias: bool = True,
+    layer_norm: bool = False,
     policy_obs_key: str = 'state',
 ) -> PiNetwork:
   """Make Pi network with preprocessor."""
@@ -93,6 +95,8 @@ def make_normal_dist_network(
       hidden_layer_sizes=policy_hidden_layer_sizes,
       activation=activation,
       bias_init=bias_init,
+      bias=bias,
+      layer_norm=layer_norm,
       obs_key=policy_obs_key,
   )
 
@@ -133,28 +137,26 @@ def make_pi_network(
 
 
 def make_ma_po_networks(
-    n_agents: int,
-    observation_size: types.ObservationSize,
-    action_size: int,
-    preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
-    policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
-    activation: networks.ActivationFn = linen.swish,
-    make_network_fn: Callable = make_pi_network,
-    policy_obs_key: str = 'state',
+        n_agents: int,
+        observation_size: types.ObservationSize,
+        action_size: int,
+        preprocess_observations_fn: types.PreprocessObservationFn = types.identity_observation_preprocessor,
+        policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
+        activation: networks.ActivationFn = linen.swish,
+        make_network_fn: Callable = make_pi_network,
+        make_network_fns: list[Callable] = None,
+        policy_obs_key: str = 'state',
 ) -> list[PiNetwork]:
     """Make policy networks with preprocessor."""
-  
-    bias_inits = [
-      jax.nn.initializers.constant(1.0),
-      jax.nn.initializers.constant(1.0)
-    ]
+
+    if make_network_fns is None:
+        make_network_fns = [make_network_fn for _ in range(n_agents)]
 
     return [
-        make_network_fn(observation_size,
-                        action_size,
-                        preprocess_observations_fn,
-                        policy_hidden_layer_sizes,
-                        activation,
-                        bias_init,
-                        policy_obs_key) for bias_init in bias_inits
+        fn(observation_size,
+           action_size,
+           preprocess_observations_fn=preprocess_observations_fn,
+           policy_hidden_layer_sizes=policy_hidden_layer_sizes,
+           activation=activation,
+           policy_obs_key=policy_obs_key) for fn in make_network_fns
     ]

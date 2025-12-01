@@ -66,6 +66,7 @@ def make_policy_network(
     activation: ActivationFn = linen.relu,
     kernel_init: Initializer = jax.nn.initializers.lecun_uniform(),
     bias_init: Initializer = jax.nn.initializers.constant(0.0),
+    bias: bool = True,
     layer_norm: bool = False,
     obs_key: str = 'state',
 ) -> FeedForwardNetwork:
@@ -75,6 +76,8 @@ def make_policy_network(
       activation=activation,
       kernel_init=kernel_init,
       bias_init=bias_init,
+      # activate_final: bool = False
+      bias=bias,
       layer_norm=layer_norm,
   )
 

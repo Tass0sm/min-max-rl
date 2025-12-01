@@ -244,9 +244,6 @@ class CVPGD:
         """
         assert self.batch_size * self.num_minibatches % config.num_envs == 0
         xt = time.time()
-        network_factory = functools.partial(ma_po_networks.make_ma_po_networks,
-                                            make_network_fn=ma_po_networks.make_normal_dist_network)
-        # network_factory = ma_po_networks.make_ma_po_networks
 
         process_count = jax.process_count()
         process_id = jax.process_index()
@@ -315,7 +312,7 @@ class CVPGD:
 
         num_agents = 2
 
-        networks = network_factory(
+        networks = train_env.network_factory(
             num_agents,
             env_state.obs.shape[-1],
             env.action_size,
@@ -424,6 +421,7 @@ class CVPGD:
                 (),
                 length=self.batch_size * self.num_minibatches // config.num_envs,
             )
+
             # Have leading dimensions (batch_size * num_minibatches, unroll_length)
             data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 1, 2), data)
             data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (-1,) + x.shape[2:]), data)
